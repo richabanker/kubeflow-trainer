@@ -1,0 +1,66 @@
+apiVersion: trainer.kubeflow.org/v1alpha1
+kind: TrainJob
+metadata:
+  name: jax-tpu-verification
+  namespace: default
+spec:
+  runtimeRef:
+    name: jax-distributed
+  trainer:
+    # Pre-configured JAX image for Cloud TPUs
+    image: us-docker.pkg.dev/cloud-tpu-images/jax-ai-image/tpu:latest
+    numNodes: 1
+    command:
+      - python3
+      - -c
+      - |
+        import os
+        import jax
+        import jax.numpy as jnp
+        # Read coordination details injected by the jax-distributed ClusterTrainingRuntime
+        coordinator_address = os.environ.get("JAX_COORDINATOR_ADDRESS")
+        num_processes = int(os.environ.get("JAX_NUM_PROCESSES", 1))
+        process_id = int(os.environ.get("JAX_PROCESS_ID", 0))
+        print(f"Initializing JAX distributed: coordinator={coordinator_address}, total={num_processes}, rank={process_id}")
+        jax.distributed.initialize(
+            coordinator_address=coordinator_address,
+            num_processes=num_processes,
+            process_id=process_id,
+        )
+        print(f"JAX distributed initialized: Process {process_id}/{num_processes}")
+        print(f"Total device count: {jax.device_count()}")
+        print(f"Local device count: {jax.local_device_count()}")
+        print(f"Available devices: {jax.devices()}")
+        # Simple JAX operation to verify physical TPU compilation & execution
+        print("Running sample dot product on TPU...")
+        x = jax.random.normal(jax.random.PRNGKey(0), (4096, 4096))
+        y = jnp.dot(x, x)
+        y.block_until_ready()
+        print(f"Successfully executed dot product! Result shape: {y.shape}")
+        print("JAX TPU verification completed successfully.")
+    resourcesPerNode:
+      limits:
+        google.com/tpu: "4" # Requesting 4 TPU chips (matches a single ct5lp-hightpu-4t host)
+      requests:
+        google.com/tpu: "4"
+  runtimePatches:
+    - manager: "example.io/user"
+      trainingRuntimeSpec:
+        template:
+          spec:
+            replicatedJobs:
+              - name: node
+                template:
+                  spec:
+                    template:
+                      spec:
+                        nodeSelector:
+                          # Target accelerator: e.g. tpu-v5-lite-podslice, tpu-v6e-slice, tpu-v7-slice, tpu-8t-slice
+                          cloud.google.com/gke-tpu-accelerator: tpu-v5-lite-podslice
+                          # Target topology: e.g. 2x2 (v5e), 2x4 (v6e), 2x2x4 (v7)
+                          cloud.google.com/gke-tpu-topology: "2x2"
+                        tolerations:
+                          # Bypass the default GKE taint on TPU nodes
+                          - key: "google.com/tpu"
+                            operator: "Exists"
+                            effect: "NoSchedule"
